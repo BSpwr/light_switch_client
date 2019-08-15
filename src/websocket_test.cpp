@@ -9,6 +9,8 @@
 
 #include <Arduino.h>
 
+#include <string>
+
 #include "MATRIXVoiceOTA.h"
 
 #include <WebSocketsClient.h>
@@ -16,107 +18,98 @@
 #include <WiFiClientSecure.h>
 
 #include <ArduinoJson.h>
+#include <RBDdimmer.h>
+
+extern "C" {
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
+#include "freertos/timers.h"
+}
 
 MATRIXVoiceOTA otaObj(WIFI_SSID, WIFI_PASS, HOSTNAME,
                       OTA_PASS);  // please see platformio.ini
 
 WebSocketsClient webSocket;
 
-DynamicJsonDocument doc(200);
-char join_channel[512];
+// DIMMER SETUP
+#define outputPinLight 26
+#define outputPinFan 27
+#define zerocross 25
 
-#define USE_SERIAL Serial
+dimmerLamp lightDimmer(outputPinLight, zerocross);
+dimmerLamp fanDimmer(outputPinFan, zerocross);
 
-void hexdump(const void* mem, uint32_t len, uint8_t cols = 16) {
-    const uint8_t* src = (const uint8_t*)mem;
-    USE_SERIAL.printf("\n[HEXDUMP] Address: 0x%08X len: 0x%X (%d)",
-                      (ptrdiff_t)src, len, len);
-    for (uint32_t i = 0; i < len; i++) {
-        if (i % cols == 0) {
-            USE_SERIAL.printf("\n[0x%08X] 0x%08X: ", (ptrdiff_t)src, i);
-        }
-        USE_SERIAL.printf("%02X ", *src);
-        src++;
+/* ************************************************************************ *
+      EASY DIMMER CONTROL
+ * ************************************************************************ */
+void setDimmer(dimmerLamp& dimmer, int intensity) {
+    intensity =
+        std::max(std::min(intensity, 94), 0);  // Gate value between 0 and 95
+    if (intensity < 15) {
+        dimmer.setMode(NORMAL_MODE);
+        dimmer.setState(OFF);
+    } else {
+        dimmer.setMode(NORMAL_MODE);
+        dimmer.setState(ON);
+        dimmer.setPower(intensity);
     }
-    USE_SERIAL.printf("\n");
+}
+
+char* getJoinMessage(std::string lobby_name) {
+    StaticJsonDocument<200> join_json;
+    char* join_json_string = new char[512];
+    join_json["topic"] = "light_switch:lobby";
+    join_json["event"] = "phx_join";
+    JsonObject payload = join_json.createNestedObject("payload");
+    join_json["ref"] = 0;
+    serializeJson(join_json, join_json_string, 512);
+    join_json.clear();
+    return join_json_string;
 }
 
 void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
-    DynamicJsonDocument ret(200);
-    DeserializationError error;
-    const char* str;
-    switch (type) {
-        case WStype_DISCONNECTED:
-            USE_SERIAL.printf("[WSc] Disconnected!\n");
-            break;
-        case WStype_CONNECTED: {
-            USE_SERIAL.printf("[WSc] Connected to url: %s\n", payload);
+    if (type == WStype_DISCONNECTED) {
+        Serial.printf("[WSc] Disconnected!\n");
+    } else if (type == WStype_CONNECTED) {
+        Serial.printf("[WSc] Connected to url: %s\n", payload);
 
-            // send message to server when Connected
-            webSocket.sendTXT(join_channel);
-        } break;
-        case WStype_TEXT:
+        // send message to server when Connected
+        char* join_json_string = getJoinMessage("light_switch:lobby");
+        webSocket.sendTXT(join_json_string);
+        delete[] join_json_string;
+    } else if (type == WStype_TEXT) {
+        StaticJsonDocument<512> response_json;
+        DeserializationError error;
+        error = deserializeJson(response_json, payload);
+        if (error) {
+            Serial.print(F("deserializeJson() failed: "));
+            Serial.println(error.c_str());
+            return;
+        }
+        const char* str = response_json["topic"];
+        if (response_json["event"] == "set_light") {
+            int lightVal = response_json["payload"]["value"];
+            Serial.printf("Setting light to %i", lightVal);
             Serial.println();
-            error = deserializeJson(ret, payload);
-            if (error) {
-                Serial.print(F("deserializeJson() failed: "));
-                Serial.println(error.c_str());
-                return;
-            }
-            serializeJson(ret, Serial);
-            Serial.println();
-            str = ret["topic"];
-            Serial.println(str);
-            // USE_SERIAL.printf("[WSc] get binary length: %u\n", length);
-            // USE_SERIAL.printf("[WSc] get text: %s\n", payload);
-
-            // send message to server
-            // webSocket.sendTXT("message here");
-            break;
-        case WStype_BIN:
-            USE_SERIAL.printf("[WSc] get binary length: %u\n", length);
-            hexdump(payload, length);
-
-            // send data to server
-            // webSocket.sendBIN(payload, length);
-            break;
-        case WStype_ERROR:
-        case WStype_FRAGMENT_TEXT_START:
-        case WStype_FRAGMENT_BIN_START:
-        case WStype_FRAGMENT:
-        case WStype_FRAGMENT_FIN:
-            break;
+            setDimmer(lightDimmer, lightVal);
+        }
+        response_json.clear();
     }
 }
 
 void setup() {
-    // USE_SERIAL.begin(921600);
-    USE_SERIAL.begin(115200);
+    Serial.begin(115200);
 
-    // Serial.setDebugOutput(true);
-    USE_SERIAL.setDebugOutput(true);
+    Serial.setDebugOutput(true);
 
-    USE_SERIAL.println();
-    USE_SERIAL.println();
-    USE_SERIAL.println();
-
-    for (uint8_t t = 4; t > 0; t--) {
-        USE_SERIAL.printf("[SETUP] BOOT WAIT %d...\n", t);
-        USE_SERIAL.flush();
-        delay(1000);
-    }
+    // Enable dimmers
+    lightDimmer.begin(NORMAL_MODE, OFF);
+    fanDimmer.begin(NORMAL_MODE, OFF);
 
     otaObj.setup();
 
     webSocket.begin("192.168.1.71", 4000, "/socket/websocket");
     webSocket.onEvent(webSocketEvent);
-
-    doc["topic"] = "light_switch:lobby";
-    doc["event"] = "phx_join";
-    JsonObject payload = doc.createNestedObject("payload");
-    doc["ref"] = 0;
-
-    serializeJson(doc, join_channel);
 }
 
 void loop() {
