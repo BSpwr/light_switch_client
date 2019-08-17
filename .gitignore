@@ -49,7 +49,7 @@ secrets.load.*
 install/*
 releases/*
 ota/firmware.bin
-platformio.ini.sample
+platformio.ini
 
 # IDE
 .travis.yml

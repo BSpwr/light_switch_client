@@ -55,6 +55,7 @@
 
 #include <ArduinoOTA.h>
 #include <WiFi.h>
+#include <WebSocketsClient.h>
 
 #include <ArduinoJson.h>
 #include <AsyncMqttClient.h>
@@ -69,6 +70,9 @@
 #include "voice_memory_map.h"
 #include "wishbone_bus.h"
 
+#include "dimmer.h"
+#include "websocket.h"
+
 extern "C" {
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -80,15 +84,6 @@ extern "C" {
 /* ************************************************************************* *
       DEFINES AND GLOBALS
  * ************************************************************************ */
-
-// DIMMER SETUP
-#define outputPinLight 26
-#define outputPinFan 27
-#define zerocross 25
-
-dimmerLamp lightDimmer(outputPinLight, zerocross);
-dimmerLamp fanDimmer(outputPinFan, zerocross);
-
 #define RATE 16000
 #define WIDTH 2
 #define CHANNELS 1
@@ -769,23 +764,6 @@ void AudioPlayTask(void *p) {
 }
 
 /* ************************************************************************ *
-      EASY DIMMER CONTROL
- * ************************************************************************ */
-void setDimmer(dimmerLamp &dimmer, int intensity) {
-    intensity =
-        std::max(std::min(intensity, 100), 0);  // Gate value between 0 and 100
-    if (intensity < 15) {
-        dimmer.setMode(NORMAL_MODE);
-        dimmer.setState(OFF);
-    } else {
-        dimmer.setMode(NORMAL_MODE);
-        dimmer.setState(ON);
-        Serial.print(intensity);
-        dimmer.setPower(intensity);
-    }
-}
-
-/* ************************************************************************ *
       SETUP
  * ************************************************************************ */
 void setup() {
@@ -796,10 +774,6 @@ void setup() {
         wbSemaphore = xSemaphoreCreateMutex();  // Create a mutex semaphore
         if ((wbSemaphore) != NULL) xSemaphoreGive(wbSemaphore);  // Free for all
     }
-
-    // Enable dimmers
-    lightDimmer.begin(NORMAL_MODE, OFF);
-    fanDimmer.begin(NORMAL_MODE, OFF);
 
     // Reconnect timers
     mqttReconnectTimer =
@@ -916,21 +890,29 @@ void setup() {
 
     // Create the runnings tasks, AudioStream is on one core, the rest on the
     // other core
-    xTaskCreatePinnedToCore(Audiostream, "Audiostream", 10000, NULL, 3,
+    xTaskCreatePinnedToCore(Audiostream, "Audiostream", 16384, NULL, 3,
                             &audioStreamHandle, 0);
     xTaskCreatePinnedToCore(everloopAnimation, "everloopAnimation", 4096, NULL,
                             3, NULL, 1);
-    xTaskCreatePinnedToCore(AudioPlayTask, "AudioPlayTask", 4096, NULL, 3,
+    xTaskCreatePinnedToCore(AudioPlayTask, "AudioPlayTask", 16384, NULL, 3,
                             &audioPlayHandle, 1);
 
     // start streaming
     xEventGroupSetBits(audioGroup, STREAM);
+
+
+    //Initialize dimmers
+    initDimmers();
+    //Initialize websocket
+    initWebsocket();
+    xTimerStart(websocketPingTimer, 0);
 }
 
 /* ************************************************************************ *
       MAIN LOOP
  * ************************************************************************ */
 void loop() {
+    handleWebsocketEvents();
     ArduinoOTA.handle();
     if (!isUpdateInProgess) {
         long now = millis();
