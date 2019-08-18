@@ -54,8 +54,8 @@
 #include <thread>
 
 #include <ArduinoOTA.h>
-#include <WiFi.h>
 #include <WebSocketsClient.h>
+#include <WiFi.h>
 
 #include <ArduinoJson.h>
 #include <AsyncMqttClient.h>
@@ -71,6 +71,7 @@
 #include "wishbone_bus.h"
 
 #include "dimmer.h"
+#include "global.h"
 #include "websocket.h"
 
 extern "C" {
@@ -80,6 +81,8 @@ extern "C" {
 }
 
 // User configuration in platformio.ini
+
+TaskHandle_t websocketEventHandleTask;
 
 /* ************************************************************************* *
       DEFINES AND GLOBALS
@@ -111,7 +114,6 @@ TimerHandle_t wifiReconnectTimer;
 TaskHandle_t audioStreamHandle;
 TaskHandle_t audioPlayHandle;
 TaskHandle_t everloopTaskHandle;
-SemaphoreHandle_t wbSemaphore;
 // Globals
 const int kMaxWriteLength = 1024;
 struct wavfile_header {
@@ -763,12 +765,13 @@ void AudioPlayTask(void *p) {
     vTaskDelete(NULL);
 }
 
-/* ************************************************************************ *
-      SETUP
- * ************************************************************************ */
+/* ************************************************************************
+ * SETUP
+ * ************************************************************************
+ */
 void setup() {
-    // Implementation of Semaphore, otherwise the ESP will crash due to read of
-    // the mics
+    // Implementation of Semaphore, otherwise the ESP will crash due to read
+    // of the mics
     if (wbSemaphore == NULL)  // Not yet been created?
     {
         wbSemaphore = xSemaphoreCreateMutex();  // Create a mutex semaphore
@@ -821,9 +824,9 @@ void setup() {
     hal::MicrophoneCore mic_core(mics);
     mic_core.Setup(&wb);
 
-    // NumberOfSamples() = kMicarrayBufferSize / kMicrophoneChannels = 4069 / 8
-    // = 512 Depending on the CHUNK, we need to calculate how many message we
-    // need to send
+    // NumberOfSamples() = kMicarrayBufferSize / kMicrophoneChannels = 4069
+    // / 8 = 512 Depending on the CHUNK, we need to calculate how many
+    // message we need to send
     message_count = (int)round(mics.NumberOfSamples() / CHUNK);
 
     xEventGroupClearBits(audioGroup, PLAY);
@@ -888,8 +891,11 @@ void setup() {
         });
     ArduinoOTA.begin();
 
-    // Create the runnings tasks, AudioStream is on one core, the rest on the
-    // other core
+    // Initialize dimmers
+    initDimmers();
+
+    // Create the runnings tasks, AudioStream is on one core, the rest on
+    // the other core
     xTaskCreatePinnedToCore(Audiostream, "Audiostream", 16384, NULL, 3,
                             &audioStreamHandle, 0);
     xTaskCreatePinnedToCore(everloopAnimation, "everloopAnimation", 4096, NULL,
@@ -897,22 +903,23 @@ void setup() {
     xTaskCreatePinnedToCore(AudioPlayTask, "AudioPlayTask", 16384, NULL, 3,
                             &audioPlayHandle, 1);
 
+    xTaskCreatePinnedToCore(handleWebsocketEvents, "handleWebsocketEvents",
+                            8194, NULL, 3, &websocketEventHandleTask, 1);
+    // TimerHandle_t websocketPingTimer = xTimerCreate(
+    //     "websocketPingTimer", pdMS_TO_TICKS(10000), pdTRUE, (void *)0,
+    //     reinterpret_cast<TimerCallbackFunction_t>(pingPhoenixChannel));
+    // xTimerStart(websocketPingTimer, 0);
+
     // start streaming
     xEventGroupSetBits(audioGroup, STREAM);
-
-
-    //Initialize dimmers
-    initDimmers();
-    //Initialize websocket
-    initWebsocket();
-    xTimerStart(websocketPingTimer, 0);
 }
 
-/* ************************************************************************ *
-      MAIN LOOP
- * ************************************************************************ */
+/* ************************************************************************
+ * MAIN LOOP
+ * ************************************************************************
+ */
 void loop() {
-    handleWebsocketEvents();
+    // handleWebsocketEvents();
     ArduinoOTA.handle();
     if (!isUpdateInProgess) {
         long now = millis();
